@@ -1,0 +1,351 @@
+---
+title: "MCMC_regression"
+output: html_document
+---
+
+```{r}
+library(mvtnorm)
+mcmc_MH <- function(Niter, proposal_sigma, mu_init, LL){
+    mu_new <- mu_init
+    d <- length(mu_new)
+    samples_MH <- mu_new
+    accept_MH <- 0
+    for(iter in 1: Niter){
+        if(d > 1){
+            propose_MH_mu <- as.numeric(rmvnorm(1, mean = mu_new, sigma = diag(rep(proposal_sigma^2, d))))
+        }
+        if(d == 1){
+            propose_MH_mu <- rnorm(1, mean = mu_new, sd = proposal_sigma)
+        }
+        rtemp <- LL(propose_MH_mu) - LL(mu_new)
+        if(runif(1) < exp(rtemp)){
+            mu_new <- propose_MH_mu
+            accept_MH <- accept_MH + 1
+        }
+        samples_MH <- rbind(samples_MH, mu_new)
+    }
+    return(list(samples = samples_MH, acceptance = accept_MH /Niter))
+}
+
+```
+
+
+## Probit regression model
+
+```{r}
+beta <- matrix(c(2, -1), ncol = 1) # we store the arbitrary parameter in a 2x1 matrix
+n <- 100 # sample size
+X <- cbind(rnorm(n, mean=1), rnorm(n, mean=1.5)) # matrix of explanatory variables
+Y <- as.numeric(pnorm(X%*%beta) >= runif(n)) # observations
+table(Y)
+```
+
+# posterior distribution
+
+
+```{r}
+B <- matrix(c(3, 0, 0, 3), ncol = 2)
+Binv <- solve(B) # prior variance
+
+library(ggplot2)
+log_prior <- function(beta){
+  return(- t(beta) %*% Binv %*% (beta) / 2)
+}
+full_log_posterior_probit <- function(beta){
+  return(sum(pnorm(q=X[Y == 1,] %*% beta, mean=0, sd=1, log.p=TRUE)) +
+    sum(pnorm(q=-X[Y == 0,]%*% beta, mean=0, sd=1, log.p=TRUE)) +
+    log_prior(beta))
+}
+grid.df <- expand.grid(seq(from=0.5,to=3.5,length.out=100), seq(from=-2,to=0,length.out=100))
+names(grid.df) <- c("beta1", "beta2")
+grid.df$density <- mapply(FUN=function(x,y) exp(full_log_posterior_probit(matrix(c(x,y),ncol=1))), grid.df$beta1, grid.df$beta2)
+g2d <- ggplot(grid.df) + geom_raster(aes(x=beta1, y=beta2, fill=density))
+g2d <- g2d + xlab(expression(beta[1])) + ylab(expression(beta[2]))
+g2d <- g2d + theme(legend.position = "none")
+print(g2d)
+```
+
+# Metropolis-Hastings
+
+```{r}
+Niter = 10000
+proposal_sigma = 0.3 # 0.3 # try other values
+mu_init = rnorm(2) # try other values
+samplesMH = mcmc_MH (Niter, proposal_sigma, mu_init, full_log_posterior_probit)
+plot(samplesMH$samples, type = 'l', xlab = '', ylab = '')
+points(t(mu_init), cex = 2, col = 'red')
+par(mfrow = c(2, 2))
+for(k in 1:2){
+  plot(samplesMH$samples[, k], type = 'l', xlab = '', ylab = '')
+  hist(samplesMH$samples[, k], xlab = '', main = '')
+}
+print(samplesMH$acceptance)
+gMH2d <- ggplot(data.frame(X1 = samplesMH$samples[, 1], X2 = samplesMH$samples[, 2]), aes(x=X1, y=X2)) + geom_density2d()
+gMH2d <- gMH2d+ xlab(expression(beta[1])) + ylab(expression(beta[2]))
+print(gMH2d)
+```
+# Gibbs sampling for Probit regression
+
+```{r}
+library(truncnorm)
+# we first implement the conditionals
+ZcondBeta <- function(beta){
+  truncnormals <- rep(0, n)
+  truncnormals[Y == 1] <- rtruncnorm(n=sum(Y == 1), mean= X[Y == 1,] %*% beta, sd=1, a=0)
+  truncnormals[Y == 0] <- rtruncnorm(n=sum(Y == 0), mean= X[Y == 0,] %*% beta, sd=1, b=0)
+  return(truncnormals)
+}
+BetacondZ <- function(Z){
+  variance <- solve(solve(B) + t(X) %*% X)
+  mean <- variance %*% (t(X) %*% Z)
+  return(t(rmvnorm(n=1, mean=mean, sigma=variance)))
+}
+# then run the systematic Gibbs sampler
+niterations <- Niter
+# starting point for the Markov chain; for fun we take the same as for the MH run
+current_beta <- matrix(rnorm(2), ncol = 1)
+# matrices storing the whole trajectory of the Markov chain
+beta_chain <- matrix(rep(current_beta, niterations), nrow=niterations, byrow=TRUE)
+# at each iteration:
+for (t in 2:niterations){
+  current_z <- ZcondBeta(current_beta)
+  current_beta <- BetacondZ(current_z)
+  beta_chain[t,] <- current_beta
+}
+Gibbschain.df <- data.frame(beta_chain)
+Gibbschain.df$step <- 1:niterations
+gGibbs <- ggplot(subset(Gibbschain.df, step < 1000), aes(x=X1, y=X2)) + geom_path() + geom_point()
+gGibbs <- gGibbs + xlab(expression(beta[1])) + ylab(expression(beta[2]))
+print(gGibbs)
+gGibbs2d <- ggplot(Gibbschain.df, aes(x=X1, y=X2)) + geom_density2d()
+gGibbs2d <- gGibbs2d+ xlab(expression(beta[1])) + ylab(expression(beta[2]))
+print(gGibbs2d)
+```
+# compare MH and Gibbs
+
+```{r}
+library(reshape2)
+bacf <- acf(Gibbschain.df[,1], plot = FALSE) # compute ACF without plot
+bacfdf <- with(bacf, data.frame(lag, acf)) # turn into data frame
+names(bacfdf) <- c("Lag", "Gibbs") # rename the columns
+bacfMH <- acf(samplesMH$samples[,1], plot = FALSE) # same same for MH
+bacfMH <- with(bacfMH, data.frame(lag, acf))
+names(bacfMH) <- c("Lag", "MH")
+ACF <- merge(bacfdf, bacfMH, by = "Lag") # merge the data frame
+ACF <- melt(ACF, id = "Lag") # reshape the data frame for ggplot2
+ACF$Lag[which(ACF$variable == 'MH')] = ACF$Lag[which(ACF$variable == 'MH')]+0.5
+gACF <- ggplot(data=ACF, mapping=aes(x=Lag, y = value, colour = variable))
+gACF <- gACF +  geom_segment(mapping = aes(xend = Lag, yend = 0), size =1) 
+gACF <- gACF +  ylab("ACF") + scale_color_discrete(name = "Sampler")
+print(gACF)  
+```
+# STAN
+
+```{r}
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+probit_dat <- list(N = n, K = 2, y = Y, x = X)
+fit <- stan(file = 'probit.stan', data = probit_dat, 
+            iter = 1000, chains = 4)
+```
+
+```{r}
+print(fit)
+```
+
+## Bayes LASSO
+
+
+```{r}
+# load data
+library(lars)
+data("diabetes")
+d_x <- diabetes$x
+d_y <- diabetes$y
+```
+
+```{r}
+# calculate LASSO results
+library(glmnet)
+lasso_results <- glmnet(d_x, d_y, intercept=FALSE)
+lasso_coef <- coef(lasso_results, s = 0.237)
+```
+
+# Metropolis-Hastings
+```{r}
+d_x <- diabetes$x
+bool_centralize <- 1
+if(bool_centralize){
+  d_x <- apply(d_x, 2, function(xx) xx-mean(xx))
+  d_y <- d_y - mean(d_y)
+}
+library(mvtnorm)
+calc_pi <- function(x, y, beta, log_sigma_sq, lambda, p) {
+  sum(dnorm(y, x %*% beta, rep(exp(log_sigma_sq), length(y)), log = T)) + p * log(lambda / 2) - p/2 * log_sigma_sq - lambda / sqrt(exp(log_sigma_sq)) * sum(abs(beta))
+}
+
+p <- ncol(d_x)
+lambda = 0.237
+beta_draws <- matrix(1, nrow = p)
+log_sigma_sq_draws <- c(0)
+num_draws = 20000
+accept = 0
+set.seed(12345)
+for (i in 1:num_draws) {
+  log_sigma_sq = rnorm(1, log_sigma_sq_draws[i], 0.1)
+  beta <- t(rmvnorm(1, beta_draws[, i], exp(log_sigma_sq) * lambda * diag(p)))
+  accept_ratio = calc_pi(d_x, d_y, beta, log_sigma_sq, lambda, p) - calc_pi(d_x, d_y, beta_draws[, i], log_sigma_sq_draws[i], lambda, p)
+  if (runif(1) <= exp(accept_ratio)) {
+    accept = accept + 1
+    beta_draws <- cbind(beta_draws, beta)
+    log_sigma_sq_draws <- c(log_sigma_sq_draws, log_sigma_sq)
+  } else {
+    beta_draws <- cbind(beta_draws, beta_draws[, i])
+    log_sigma_sq_draws <- c(log_sigma_sq_draws, log_sigma_sq_draws[i])
+  }
+}
+
+#Acceptance ratio
+accept / num_draws
+```
+
+```{r}
+#Trace plots and histograms
+plot(log_sigma_sq_draws, type = "l")
+plot(beta_draws[1,], type = "l")
+for(j in 1:dim(beta_draws)[1]){
+  hist(beta_draws[j,], 20, main = row.names(lasso_coef)[j+1], xlab = paste("beta", row.names(lasso_coef)[j+1]))
+  abline(v = lasso_coef[j+1], col = "red")
+}
+beta_mh <- beta_draws
+```
+
+```{r}
+rowMeans(beta_draws[, 10002:20001])
+```
+
+
+```{r}
+if (!require(statmod)) {
+  install.packages("statmod")
+  library(statmod)
+}
+d_x <- diabetes$x
+d_y <- diabetes$y
+cd_x <- apply(d_x, 2, function(col) {col - mean(col)})
+cd_y <- d_y - mean(d_y)
+
+n = length(cd_y)
+p <- ncol(d_x)
+lambda = 0.237
+sigma_sq_draws <- c(1)
+beta_draws <- matrix(1, nrow = p)
+tau_draws <- beta_draws
+num_draws = 20000
+accept = 0
+
+set.seed(12345)
+for (i in 1:num_draws) {
+  sigma_sq_draws <- c(sigma_sq_draws, 
+                      1 / rgamma(1, (n + p - 1) / 2, 
+                                 sum((cd_y - cd_x %*% beta_draws[,i])^2) +
+                                 sum(beta_draws[, i]^2 / tau_draws[, i])))
+  m <- (t(cd_x) %*% cd_x + diag(1 / tau_draws[, i]))
+  beta_draws <- cbind(beta_draws, 
+                      t(rmvnorm(1, solve(m, t(cd_x) %*% cd_y), solve(m) * 
+                      sigma_sq_draws[i + 1])))
+  tau_draws <- cbind(tau_draws,
+                     unlist(sapply(beta_draws[, (i + 1)], function(beta) {
+                       1 / rinvgauss(1, sqrt(lambda^2 * sigma_sq_draws[i + 1] / beta^2), lambda^2)
+                     })))
+}
+```
+
+```{r}
+#Trace plots
+plot(sigma_sq_draws, type = "l")
+plot(beta_draws[1,], type = "l")
+plot(tau_draws[1,], type = "l")
+for(j in 1:dim(beta_draws)[1]){
+  hist(beta_draws[j,], 20, main = row.names(lasso_coef)[j+1], xlab = paste("beta", row.names(lasso_coef)[j+1]))
+  abline(v = lasso_coef[j+1], col = "red")
+}
+beta_gibbs <- beta_draws
+```
+
+```{r}
+library(glmnet)
+library(lars)
+library(rstan)
+
+data("diabetes")
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+d_x <- diabetes$x
+d_y <- diabetes$y
+data_list <- list("n" = length(d_y), "p" = ncol(d_x), "lambda" = 0.237, "x" = d_x, "y" = d_y)
+stan_lasso <- stan(file = "bayes_lasso.stan", data = data_list)
+```
+
+```{r}
+summary(stan_lasso)$summary[, "mean"]
+samples_stan <- extract(stan_lasso)
+beta_draws_stan <- t(samples_stan$beta)
+for(j in 1:dim(beta_draws_stan)[1]){
+  hist(beta_draws_stan[j,], 20, main = row.names(lasso_coef)[j+1], xlab = paste("beta", row.names(lasso_coef)[j+1]))
+  abline(v = lasso_coef[j+1], col = "red")
+}
+```
+
+
+# compare MH, Gibbs, STAN
+
+```{r}
+library(reshape2)
+
+for(j in 1:10){
+  acfgibbs <- acf(beta_gibbs[j, ], plot = FALSE)
+  acfgibbsdf <- with(acfgibbs, data.frame(lag, acf))
+  names(acfgibbsdf) <- c("Lag", "Gibbs")
+  acfmh <- acf(beta_mh[j, ], plot = FALSE)
+  acfmhdf <- with(acfmh, data.frame(lag, acf))
+  names(acfmhdf) <- c("Lag", "MH")
+  acfstan <- acf(beta_draws_stan[j, ], plot = FALSE)
+  acfstandf <- with(acfstan, data.frame(lag, acf))
+  names(acfstandf) <- c("Lag", "STAN")
+  ACF <- merge(acfmhdf, acfgibbsdf, by = "Lag")
+  ACF <- merge(ACF, acfstandf, by = "Lag")
+  ACF <- melt(ACF, id = "Lag")
+  ACF$Lag[which(ACF$variable == 'MH')] = ACF$Lag[which(ACF$variable == 'MH')]+0.34
+  ACF$Lag[which(ACF$variable == 'Gibbs')] = ACF$Lag[which(ACF$variable == 'Gibbs')]+0.7
+  gACF <- ggplot(data=ACF, mapping=aes(x=Lag, y = value, colour = variable))
+  gACF <- gACF +  geom_segment(mapping = aes(xend = Lag, yend = 0), size =1) 
+  gACF <- gACF +  ylab("ACF") + scale_color_discrete(name = "Sampler")
+  print(gACF)
+}
+  
+```
+
+```{r}
+
+for(j in 1:10){
+  acfgibbs <- acf(beta_gibbs[j, ], plot = FALSE)
+  acfgibbsdf <- with(acfgibbs, data.frame(lag, acf))
+  names(acfgibbsdf) <- c("Lag", "Gibbs")
+  acfstan <- acf(beta_draws_stan[j, ], plot = FALSE)
+  acfstandf <- with(acfstan, data.frame(lag, acf))
+  names(acfstandf) <- c("Lag", "STAN")
+  ACF <- merge(acfgibbsdf, acfstandf, by = "Lag")
+  ACF <- melt(ACF, id = "Lag")
+  ACF$Lag[which(ACF$variable == 'Gibbs')] = ACF$Lag[which(ACF$variable == 'Gibbs')]+0.5
+  gACF <- ggplot(data=ACF, mapping=aes(x=Lag, y = value, colour = variable))
+  gACF <- gACF +  geom_segment(mapping = aes(xend = Lag, yend = 0), size =1) 
+  gACF <- gACF +  ylab("ACF") + scale_color_discrete(name = "Sampler")
+  print(gACF)
+}
+  
+```
+

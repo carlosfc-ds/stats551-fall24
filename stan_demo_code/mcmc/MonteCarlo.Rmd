@@ -1,0 +1,105 @@
+---
+title: "MonteCarlo"
+output: html_document
+---
+
+## One Dimensional Example
+## Target distribution $N(1, 0.8)$
+## Quantity of interest: expectation and variance
+## Analytical solution: 1 and 0.8
+
+```{r}
+## Create histograms or contours of posteriors
+library(ggplot2)
+library(gridExtra)
+library(tidyr)
+
+logpost <- function(x) {- (x - 1)^2 / 1.6}
+
+# create grid and visualize
+xseq <- seq(-3, 5, length.out = 1000)
+lp <- logpost(xseq)
+postden <- exp(lp - max(lp))
+plot(xseq, postden)
+
+# Riemann-type integration
+print(c(sum(postden * xseq) / sum(postden), 
+        sum(postden * xseq^2) / sum(postden) - (sum(postden * xseq) / sum(postden))^2))
+
+
+Nsamples <- 2000
+
+# sample from the target with regular-space-grid
+
+samples_grid <- sample(xseq, Nsamples, replace = TRUE, prob = postden)
+hist(samples_grid, freq = FALSE, 30)
+lines(xseq, postden/sum(postden) / (xseq[2] - xseq[1]), col = 'red')
+print(c(mean(samples_grid), var(samples_grid)))
+
+# sample from the target with uniform distribution
+
+unifsamples <- runif(Nsamples, -3, 5)
+logweights <- logpost(unifsamples)
+weights <- exp(logweights - max(logweights))
+samples_unif <- sample(unifsamples, Nsamples, replace = TRUE, prob = weights)
+hist(samples_unif, freq = FALSE, 20)
+lines(xseq, postden/sum(postden) / (xseq[2] - xseq[1]), col = 'red')
+print(c(mean(samples_unif), var(samples_unif)))
+
+# importance sampling with student t as importance function
+df_t = 1
+tsamples <- 1 + rt(Nsamples, df = df_t)
+logweights_t <- logpost(tsamples) - dt(tsamples - 1, df = df_t, log = TRUE)
+weights_t <- exp(logweights_t - max(logweights_t))
+samples_t <- sample(tsamples, Nsamples, replace = TRUE, prob = weights_t)
+hist(samples_t, freq = FALSE, 20)
+lines(xseq, postden/sum(postden) / (xseq[2] - xseq[1]), col = 'red')
+print(c(mean(samples_t), var(samples_t)))
+
+```
+
+
+## 2 dim example
+
+
+```{r}
+Nx = 20
+Ny = 20
+logpost2d <- function(x) {-(x[1]-3)^2 * x[2]^2 - (x[1])^2 /10 - x[2]^2}
+x1seq <- seq(-5, 6, length.out = Nx)
+x2seq <- seq(-2, 2, length.out = Ny)
+x12seq <- expand.grid(x1seq, x2seq)
+x1seq <- x12seq[, 1]
+x2seq <- x12seq[, 2]
+zval <- apply(x12seq, 1, logpost2d)
+zval <- exp(zval - max(zval))
+ggplot(data = data.frame(x1seq ,x2seq, zval), aes(x = x1seq, y = x2seq)) +
+  geom_raster(aes(fill = zval, alpha = zval), interpolate = T) +
+  geom_contour(aes(z = zval), colour = 'black', size = 0.2) +
+  labs(x = '', y = '') +
+  scale_fill_gradient(low = 'yellow', high = 'red', guide = F) +
+  scale_alpha(range = c(0, 1), guide = F)
+```
+
+
+```{r}
+
+logpost2d <- function(x, y) {-(x-3)^2 * y^2 - (x)^2 /10 - y^2}
+x1seq <- seq(-5, 6, length.out = Nx)
+x2seq <- seq(-2, 2, length.out = Ny)
+zout <- outer(x1seq, x2seq, logpost2d)
+zout <- exp(zout - max(zout))
+par(mfrow = c(1, 3))
+persp(x = x1seq, y = x2seq, z = zout, theta = 0, phi = 30)
+persp(x = x1seq, y = x2seq, z = zout, theta = 30, phi = 60)
+persp(x = x1seq, y = x2seq, z = zout, theta = 60, phi = 90)
+```
+
+```{r}
+# random samples
+idx <- sample(1:dim(x12seq)[1], size = 1000, replace = TRUE, prob = zval/sum(zval))
+samples2d <- x12seq[idx, ]
+par(mfrow = c(1, 2))
+hist(samples2d[, 1], main = '', xlab = '', ylab = '')
+hist(samples2d[, 2], main = '', xlab = '', ylab = '')
+```

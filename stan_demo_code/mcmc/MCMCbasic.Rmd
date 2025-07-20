@@ -1,0 +1,407 @@
+---
+title: "MCMCbasic"
+output: html_document
+---
+
+## Gibbs Sampling of bivariate normal
+```{r}
+rho = 0.8
+y = c(0, 0)
+Niter = 1000
+theta = array(0, c(2, Niter))
+theta[, 1] = c(5, 8) # starting point, change it to different values
+for(k in 2:Niter){
+  theta[1, k] = y[1] + rho * (theta[2, k-1] - y[2]) + sqrt(1 - rho^2) * rnorm(1)
+  theta[2, k] = y[2] + rho * (theta[1, k] - y[1]) + sqrt(1 - rho^2) * rnorm(1)
+}
+```
+
+```{r}
+# visualize trace (2dim)
+plot(t(theta), type = 'l', xlab = expression(theta[1]), ylab = expression(theta[2]))
+points(theta[1, 1], theta[2, 1], col = "red", cex = 3)
+```
+```{r}
+library(coda)
+# visualize each dim
+par(mfrow = c(2, 2))
+
+for(k in 1:2){
+  plot(theta[k, ], type = 'l', xlab = "iteration", ylab = expression(theta), main = paste("gibbs samples for theta", k))
+}
+
+for(k in 1:2){
+  plot(theta[k, 1:30], type = 'l', xlab = "iteration", ylab = expression(theta), main = paste("first 30 iterations, theta", k))
+}
+
+# choose burnin
+par(mfrow = c(1, 3))
+burnin <- 30
+theta <- theta[, burnin:dim(theta)[2]]
+for(k in 1:2){
+  plot(theta[k, ], type = 'l', xlab = "iteration", ylab = expression(theta), main = paste("gibbs samples for theta", k, "(after burnin)"))
+  hist(theta[k, ], xlab = expression(theta), freq = FALSE, main = paste("theta", k))
+  lines(seq(-3, 3, length.out = 100), dnorm(seq(-3, 3, length.out = 100)), col = "red")
+  acf(theta[k, ])
+}
+for(k in 1:2){
+  print(paste("Effective sample size for theta", k, "is", effectiveSize(theta[k, ])))
+}
+```
+
+
+## Gibbs Sampling of Beta-Binomial
+
+```{r}
+n = 20
+alpha = 0.5
+beta = 0.5
+Niter = 5000
+x = rep(1, Niter)
+y = rep(0.5, Niter)
+for(k in 2:Niter){
+  x[k] = rbinom(1, n, y[k-1])
+  y[k] = rbeta(1, alpha + x[k], n - x[k] + beta)
+}
+plot(jitter(x), y, pch = 19, cex = 0.2, xlab = 'x', ylab = 'y')
+```
+```{r}
+# visualize each dim
+par(mfrow = c(2, 2))
+plot(y, type = 'l', xlab = "iteration", ylab = "y", main = "gibbs samples for y")
+plot(y[1:30], type = 'l', xlab = "iteration", ylab = "y", main = "first 30 iterations")
+plot(y[1:80], type = 'l', xlab = "iteration", ylab = "y", main = "first 80 iterations")
+plot(y[1:200], type = 'l', xlab = "iteration", ylab = "y", main = "first 200 iterations")
+par(mfrow = c(1, 3))
+acf(y, main = "no thinning")
+acf(y[seq(1, length(y), by = 5)], main = "thin by 5")
+acf(y[seq(1, length(y), by = 20)], main = 'thin by 20')
+print(paste("Effective sample size for y is", effectiveSize(y)))
+
+```
+
+
+## Metropolis Hastings
+
+```{r}
+library(mvtnorm)
+mcmc_MH <- function(Niter, proposal_sigma, mu_init, LL){
+    mu_new <- mu_init
+    d <- length(mu_new)
+    samples_MH <- mu_new
+    accept_MH <- 0
+    for(iter in 1: Niter){
+        if(d > 1){
+            propose_MH_mu <- as.numeric(rmvnorm(1, mean = mu_new, sigma = diag(rep(proposal_sigma^2, d))))
+        }
+        if(d == 1){
+            propose_MH_mu <- rnorm(1, mean = mu_new, sd = proposal_sigma)
+        }
+        rtemp <- LL(propose_MH_mu) - LL(mu_new)
+        if(runif(1) < exp(rtemp)){
+            mu_new <- propose_MH_mu
+            accept_MH <- accept_MH + 1
+        }
+        samples_MH <- rbind(samples_MH, mu_new)
+    }
+    return(list(samples = samples_MH, acceptance = accept_MH /Niter))
+}
+
+```
+
+## Metropolis-Hastings toy example
+
+```{r}
+LL <- function(x){
+  sum(dnorm(x, log = TRUE))
+}
+Niter = 1000
+proposal_sigma = 1 # try other values
+mu_init = c(10, 3) # try other values
+samplesMH = mcmc_MH (Niter, proposal_sigma, mu_init, LL)
+plot(apply(samplesMH$samples, 2, jitter), type = 'l', xlab = '', ylab = '')
+points(t(mu_init), cex = 2, col = 'red')
+par(mfrow = c(2, 3))
+for(k in 1:2){
+  plot(jitter(samplesMH$samples[, k]), type = 'l', xlab = '', ylab = '')
+  hist(samplesMH$samples[, k], xlab = '', main = '', freq = FALSE)
+  lines(seq(-3, 3, length.out = 100), dnorm(seq(-3, 3, length.out = 100)), col = "red")
+  acf(samplesMH$samples[, k])
+  print(paste("Effective sample size", k, " is", effectiveSize(samplesMH$samples[, k])))
+}
+print(paste("Acceptance rate is", samplesMH$acceptance))
+```
+# try different starting values
+
+```{r}
+Niter = 1000
+proposal_sigma = 2 
+mu_init_vals = cbind(c(6, 6, -6, -6), c(6, -6, 6, -6))
+burnin = 100
+samplesMHmulti = apply(mu_init_vals, 1, function(mu_init) mcmc_MH (Niter, proposal_sigma, mu_init, LL))
+idxburn <- burnin:dim(samplesMHmulti[[1]]$samples)[1]
+for(jj in 1:4){
+  par(mfrow = c(1, 1))
+  samplesMH = samplesMHmulti[[jj]]
+  plot(apply(samplesMH$samples, 2, jitter), type = 'l', xlab = '', ylab = '', main = paste("Acceptance rate is", samplesMH$acceptance))
+  points(t(samplesMH$samples[, 1]), cex = 2, col = 'red')
+  par(mfrow = c(2, 2))
+  for(k in 1:2){
+    plot(jitter(samplesMH$samples[, k]), type = 'l', xlab = '', ylab = '', main = paste("dim", k))
+    plot(jitter(samplesMH$samples[idxburn, k]), type = 'l', xlab = '', ylab = '', main = paste("Effective sample size", k, " is", round(effectiveSize(samplesMH$samples[idxburn, k]), 2)))
+    hist(samplesMH$samples[idxburn, k], xlab = '', main = '', freq = FALSE)
+    lines(seq(-3, 3, length.out = 100), dnorm(seq(-3, 3, length.out = 100)), col = "red")
+    acf(samplesMH$samples[idxburn, k])
+    }
+}
+```
+```{r}
+## Geweke diagnostics
+for(k in 1:4){
+  print(geweke.diag(samplesMHmulti[[k]]$samples))
+}
+# after burnin
+idxburn <- burnin:dim(samplesMHmulti[[1]]$samples)[1]
+for(k in 1:4){
+  print(geweke.diag(samplesMHmulti[[k]]$samples[idxburn,]))
+}
+```
+
+```{r}
+
+par(mfrow = c(1, 1))
+for(dimselect in 1:2){
+  samples4chains = c()
+  for(jj in 1:4){
+    samples4chains <- cbind(samples4chains, samplesMHmulti[[jj]]$samples[, dimselect])
+  }
+  plot(samples4chains[, 1], xlab = 'iteration', ylab = '', main = 'compare 4 chains', col = 1, type = "l", ylim = range(samples4chains))
+  for(jj in 2:4){
+    lines(samples4chains[, jj], col = jj)
+  }
+  legend("topright", col = 1:4, paste("chain", 1:4), lty = rep(1, 4))
+  
+  idxinit <- 1:30
+  plot(samples4chains[idxinit, 1], xlab = 'iteration', ylab = '', main = 'compare 4 chains', col = 1, type = "l", ylim = range(samples4chains))
+  for(jj in 2:4){
+    lines(samples4chains[idxinit, jj], col = jj)
+  }
+  legend("topright", col = 1:4, paste("chain", 1:4), lty = rep(1, 4))
+}
+```
+# analyze variance
+
+```{r}
+
+# 1. do not break one chain into two
+burnin <- 100
+for(dimselect in 1:2){
+  samples4chains = c()
+  for(jj in 1:4){
+    idxburn <- burnin:dim(samplesMHmulti[[jj]]$samples)[1]
+    samples4chains <- cbind(samples4chains, samplesMHmulti[[jj]]$samples[idxburn, dimselect])
+  }
+  within_chain_var <- apply(samples4chains, 2, var)
+  means_chains <- apply(samples4chains, 2, mean)
+  between_chain_var <- var(means_chains)
+  print(paste("dimension", dimselect))
+  print(paste("Between chain variance is", round(between_chain_var, 3)))
+  print("Within chain variance is")
+  print(round(within_chain_var, 3))
+}
+```
+
+```{r}
+# 2. break each chain into two
+burnin <- 100
+for(dimselect in 1:2){
+  samples4chains = c()
+  for(jj in 1:4){
+    idxburn <- burnin:dim(samplesMHmulti[[jj]]$samples)[1]
+    samples4chains <- cbind(samples4chains, samplesMHmulti[[jj]]$samples[idxburn, dimselect])
+  }
+  halfnum <- floor(dim(samples4chains)[1]/2)
+  samples4chains <- cbind(samples4chains[1:halfnum, ], samples4chains[(halfnum+1):(2*halfnum), ])
+  within_chain_var <- apply(samples4chains, 2, var)
+  means_chains <- apply(samples4chains, 2, mean)
+  between_chain_var <- var(means_chains)
+  print(paste("dimension", dimselect))
+  print(paste("Between chain variance is", round(between_chain_var, 3)))
+  print("Within chain variance is")
+  print(round(within_chain_var, 3))
+}
+```
+```{r}
+
+mcmclist4chains <- mcmc.list(as.mcmc(samplesMHmulti[[1]]$samples), as.mcmc(samplesMHmulti[[2]]$samples), as.mcmc(samplesMHmulti[[3]]$samples), as.mcmc(samplesMHmulti[[4]]$samples))
+gelman.diag(mcmclist4chains)
+gelman.plot(mcmclist4chains)
+
+## Geweke diagnostics
+for(k in 1:4){
+  print(geweke.diag(mcmclist4chains[[k]]))
+  geweke.plot(mcmclist4chains[[k]])
+}
+# after burnin
+idxburn <- burnin:dim(samplesMHmulti[[1]]$samples)[1]
+for(k in 1:4){
+  print(geweke.diag(samplesMHmulti[[k]]$samples[idxburn,]))
+}
+```
+
+# try different step sizes
+
+```{r}
+Niter = 1000
+proposal_sigma = 2 
+mu_init = c(0, 0)
+burnin = 100
+proposal_sigma_vals <- c(0.3, 1, 3, 6)
+samplesMHmulti = sapply(proposal_sigma_vals, function(proposal_sigma) mcmc_MH (Niter, proposal_sigma, mu_init, LL), simplify = FALSE)
+```
+
+# visualize results
+```{r}
+idxburn <- burnin:dim(samplesMHmulti[[1]]$samples)[1]
+for(jj in 1:4){
+  par(mfrow = c(1, 1))
+  samplesMH = samplesMHmulti[[jj]]
+  plot(apply(samplesMH$samples, 2, jitter), type = 'l', xlab = '', ylab = '', main = paste("Acceptance rate is", samplesMH$acceptance))
+  points(t(samplesMH$samples[, 1]), cex = 2, col = 'red')
+  par(mfrow = c(2, 2))
+  for(k in 1:2){
+    plot(jitter(samplesMH$samples[, k]), type = 'l', xlab = '', ylab = '')
+    plot(jitter(samplesMH$samples[idxburn, k]), type = 'l', xlab = '', ylab = '', main = paste("Effective sample size", k, " is", round(effectiveSize(samplesMH$samples[idxburn, k]), 2)))
+    hist(samplesMH$samples[idxburn, k], xlab = '', main = '', freq = FALSE)
+    lines(seq(-3, 3, length.out = 100), dnorm(seq(-3, 3, length.out = 100)), col = "red")
+    acf(samplesMH$samples[idxburn, k], main = '')
+    }
+}
+
+par(mfrow = c(1, 1))
+for(dimselect in 1:2){
+  samples4chains = c()
+  for(jj in 1:4){
+    samples4chains <- cbind(samples4chains, samplesMHmulti[[jj]]$samples[, dimselect])
+  }
+  plot(samples4chains[, 1], xlab = 'iteration', ylab = '', main = 'compare 4 chains', col = 1, type = "l", ylim = range(samples4chains))
+  for(jj in 2:4){
+    lines(samples4chains[, jj], col = jj)
+  }
+  legend("topright", col = 1:4, paste("chain", 1:4), lty = rep(1, 4))
+  
+  idxinit <- 1:30
+  plot(samples4chains[idxinit, 1], xlab = 'iteration', ylab = '', main = 'compare 4 chains', col = 1, type = "l", ylim = range(samples4chains))
+  for(jj in 2:4){
+    lines(samples4chains[idxinit, jj], col = jj)
+  }
+  legend("topright", col = 1:4, paste("chain", 1:4), lty = rep(1, 4))
+}
+```
+
+```{r}
+# Calculate R hat
+burnin <- 100
+for(dimselect in 1:2){
+  samples4chains = c()
+  for(jj in 1:4){
+    idxburn <- burnin:dim(samplesMHmulti[[jj]]$samples)[1]
+    samples4chains <- cbind(samples4chains, samplesMHmulti[[jj]]$samples[idxburn, dimselect])
+  }
+  halfnum <- floor(dim(samples4chains)[1]/2)
+  samples4chains <- cbind(samples4chains[1:halfnum, ], samples4chains[(halfnum+1):(2*halfnum), ])
+  within_chain_var <- apply(samples4chains, 2, var)
+  means_chains <- apply(samples4chains, 2, mean)
+  between_chain_var <- var(means_chains)
+  print(paste("dimension", dimselect))
+  print(paste("Between chain variance is", round(between_chain_var, 3)))
+  print("Within chain variance is")
+  print(round(within_chain_var, 3))
+}
+
+mcmclist4chains <- mcmc.list(as.mcmc(samplesMHmulti[[1]]$samples), as.mcmc(samplesMHmulti[[2]]$samples), as.mcmc(samplesMHmulti[[3]]$samples), as.mcmc(samplesMHmulti[[4]]$samples))
+gelman.diag(mcmclist4chains)
+gelman.plot(mcmclist4chains)
+
+## Geweke diagnostics
+for(k in 1:4){
+  print(geweke.diag(mcmclist4chains[[k]]))
+  geweke.plot(mcmclist4chains[[k]])
+}
+# after burnin
+idxburn <- burnin:dim(samplesMHmulti[[1]]$samples)[1]
+for(k in 1:4){
+  print(geweke.diag(samplesMHmulti[[k]]$samples[idxburn,]))
+}
+```
+
+# for multiple chains with same proposal, calculate R hat (within and between chain variabilities)
+```{r}
+Niter = 1000
+proposal_sigma = 2 
+mu_init = c(0, 0)
+burnin = 100
+samplesMHmulti = sapply(1:4, function(proposal_sigma) mcmc_MH (Niter, proposal_sigma, mu_init, LL), simplify = FALSE)
+# 1. do not break one chain into two
+burnin <- 100
+idxburn <- burnin:dim(samplesMHmulti[[1]]$samples)[1]
+for(dimselect in 1:2){
+  samples4chains = c()
+  for(jj in 1:4){
+    idxburn <- burnin:dim(samplesMHmulti[[jj]]$samples)[1]
+    samples4chains <- cbind(samples4chains, samplesMHmulti[[jj]]$samples[idxburn, dimselect])
+  }
+  within_chain_var <- mean(apply(samples4chains, 2, var))
+  means_chains <- apply(samples4chains, 2, mean)
+  n = length(idxburn)
+  between_chain_var <- var(means_chains) * n
+  Rstat <- sqrt(((1 - 1/n) * within_chain_var + between_chain_var /n)/within_chain_var)
+  print(paste("dimension", dimselect))
+  print(paste("Between chain variance is", round(between_chain_var, 3)))
+  print(paste("Within chain variance is", round(within_chain_var, 3)))
+  print(paste("Rhat is", round(Rstat, 3)))
+}
+```
+
+```{r}
+# 2. break each chain into two
+burnin <- 100
+for(dimselect in 1:2){
+  samples4chains = c()
+  for(jj in 1:4){
+    idxburn <- burnin:dim(samplesMHmulti[[jj]]$samples)[1]
+    samples4chains <- cbind(samples4chains, samplesMHmulti[[jj]]$samples[idxburn, dimselect])
+  }
+  halfnum <- floor(dim(samples4chains)[1]/2)
+  samples4chains <- cbind(samples4chains[1:halfnum, ], samples4chains[(halfnum+1):(2*halfnum), ])
+  within_chain_var <- mean(apply(samples4chains, 2, var))
+  means_chains <- apply(samples4chains, 2, mean)
+  n = halfnum
+  between_chain_var <- var(means_chains) * n
+  Rstat <- sqrt(((1 - 1/n) * within_chain_var + between_chain_var / n)/within_chain_var)
+  print(paste("dimension", dimselect))
+  print(paste("Between chain variance is", round(between_chain_var, 3)))
+  print(paste("Within chain variance is", round(within_chain_var, 3)))
+  print(paste("Rhat is", round(Rstat, 3)))
+}
+```
+
+
+```{r}
+
+mcmclist4chains <- mcmc.list(as.mcmc(samplesMHmulti[[1]]$samples), as.mcmc(samplesMHmulti[[2]]$samples), as.mcmc(samplesMHmulti[[3]]$samples), as.mcmc(samplesMHmulti[[4]]$samples))
+gelman.diag(mcmclist4chains)
+gelman.plot(mcmclist4chains)
+
+## Geweke diagnostics
+for(k in 1:4){
+  print(geweke.diag(mcmclist4chains[[k]]))
+  geweke.plot(mcmclist4chains[[k]])
+}
+# after burnin
+idxburn <- burnin:dim(samplesMHmulti[[1]]$samples)[1]
+for(k in 1:4){
+  print(geweke.diag(samplesMHmulti[[k]]$samples[idxburn,]))
+}
+```
+

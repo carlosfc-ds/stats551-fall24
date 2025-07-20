@@ -1,0 +1,265 @@
+---
+title: "ElectionForecast"
+output: html_document
+---
+# load data
+```{r}
+# description of data is here:
+# http://www.stat.columbia.edu/~gelman/book/data/presidential.asc
+electiondata <- read.table("election.txt", header = TRUE)
+```
+
+# visualizations
+```{r}
+namescol <- names(electiondata)
+# Fig 1: visualize response and covariates
+for(j in 1:dim(electiondata)[2]){
+  hist(electiondata[, j], main = namescol[j], xlab = toString(round(summary(electiondata[, j]), 3)), ylab = "")
+}
+```
+
+# Remove NA's 
+
+```{r}
+idxNA <- which(unlist(apply(electiondata, 1, function(x){sum(is.na(x))})) > 0)
+print(electiondata[idxNA, ])
+electiondata <- electiondata[setdiff(1:dim(electiondata)[1], idxNA), ]
+# vote for the Democrats
+Y <- electiondata$Dvote
+# predictors
+X <- electiondata[, 2:dim(electiondata)[2]]
+```
+# Pair wise correlations
+
+```{r}
+library(ggplot2)
+for(j in 2:dim(electiondata)[2]){
+  plot(electiondata[, j], electiondata$Dvote, xlab = names(electiondata)[j], ylab = "Dvote")
+}
+```
+
+# are previous years predictive of current year?
+```{r}
+years_uniq <- sort(unique(electiondata$year))
+for(j in 1:(length(years_uniq) - 1)){
+  prev <- electiondata$Dvote[electiondata$year == years_uniq[j]]
+  new <- electiondata$Dvote[electiondata$year == years_uniq[j+1]]
+  if(length(prev) == length(new)){
+  plot(prev, new, xlab = years_uniq[j], ylab = years_uniq[j+1], main = '')
+  }
+}
+```
+
+
+# First Model: simple linear regression
+
+```{r}
+linearregressionresult <- lm(Y~as.matrix(X))
+summary(linearregressionresult)
+plot(linearregressionresult$fitted.values, Y)
+lines(quantile(Y, c(0.01, 0.99)), quantile(Y, c(0.01, 0.99)), col = "red")
+```
+# Rstan 
+```{r}
+require(rstanarm)
+postlinearmodel <- stan_glm(Dvote ~ .-1, data = electiondata, 
+                  family = gaussian(link = "identity"))
+summary(postlinearmodel)
+posteriorsampleslm <- as.matrix(postlinearmodel)
+coeflm <- as.numeric(linearregressionresult$coefficients)
+coeflm[5] <- coeflm[1]
+cbind(coef(postlinearmodel), coeflm[-1])
+```
+# Question: is the regression model above valid?
+
+```{r}
+linearregressionresult2 <- lm(Y~as.matrix(X)[, -(1:3)])
+summary(linearregressionresult2)
+plot(linearregressionresult2$fitted.values, Y)
+lines(quantile(Y, c(0.01, 0.99)), quantile(Y, c(0.01, 0.99)), col = "red")
+```
+```{r}
+require(rstanarm)
+postlinearmodel2 <- stan_glm(Dvote ~ constant + n1+n2+n3+n4+s1+s2+s3+s4+s5+s6+s7+s8+s9+r1+r2+r3+r4+r5+r6, data = electiondata, 
+                  family = gaussian(link = "identity"))
+summary(postlinearmodel2)
+posteriorsampleslm2 <- as.matrix(postlinearmodel2)
+coeflm2 <- as.numeric(linearregressionresult2$coefficients)
+coeflm2[2] <- coeflm2[1]
+cbind(coef(postlinearmodel2)[1:20], coeflm2[-1])
+```
+# How these two regression models differ?
+
+```{r}
+# estimated sigma: residue s.d.
+summary(posteriorsampleslm2[, 21])
+summary(posteriorsampleslm[, 24])
+```
+
+
+# Model checking
+
+```{r}
+# posterior correlations of parameters
+library(ggplot2)
+library(reshape2)
+ggplot(data = melt(cov2cor(vcov(postlinearmodel))), aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# posterior predictive quantities
+years <- sort(unique(electiondata$year))
+ypred <- posteriorsampleslm[, 1:23] %*% t(X) + rnorm(4000) * posteriorsampleslm[, 24]
+
+# examine residues
+residuepred <- ypred - posteriorsampleslm[, 1:23] %*% t(X)
+residueobs <- t(apply(posteriorsampleslm[, 1:23] %*% t(X), 1, function(z) Y-z))
+par(mfrow = c(1, 2))
+hist(residueobs, xlim = c(-0.15, 0.15), freq = FALSE)
+hist(residuepred, xlim = c(-0.15, 0.15), freq = FALSE)
+par(mfrow = c(1, 2))
+for(j in 1:length(years)){
+  idx <- which(electiondata$year == years[j])
+  hist(apply(ypred[, idx], 1, mean), xlab="mean", freq=FALSE, main = years[j])
+  abline(v=mean(Y[idx]), col = "red")
+  hist(apply(ypred[, idx], 1, var), xlab="var", freq=FALSE, main = years[j])
+  abline(v=var(Y[idx]), col = "red")
+}
+```
+
+
+```{r}
+# posterior correlations of parameters
+ggplot(data = melt(cov2cor(vcov(postlinearmodel2))), aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# posterior predictive quantities
+years <- sort(unique(electiondata$year))
+ypred2 <- posteriorsampleslm2[, 1:20] %*% t(X[4:23]) + rnorm(4000) * posteriorsampleslm2[, 21]
+residuepred2 <- ypred2 - posteriorsampleslm2[, 1:20] %*% t(X[4:23])
+residueobs2 <- t(apply(posteriorsampleslm2[, 1:20] %*% t(X[4:23]), 1, function(z) Y-z))
+par(mfrow = c(1, 2))
+hist(residueobs2, xlim = c(-0.15, 0.15), freq = FALSE)
+hist(residuepred2, xlim = c(-0.15, 0.15), freq = FALSE)
+par(mfrow = c(1, 2))
+for(j in 1:length(years)){
+  idx <- which(electiondata$year == years[j])
+  hist(apply(ypred2[, idx], 1, mean), xlab="mean", freq=FALSE, main = years[j])
+  abline(v=mean(Y[idx]), col = "red")
+  hist(apply(ypred2[, idx], 1, var), xlab="variance", freq=FALSE, main = years[j])
+  abline(v=var(Y[idx]), col = "red")
+}
+```
+
+
+# Year-to-Year, State-to-State
+
+```{r}
+# does last year predict this year?
+par(mfrow = c(2, 2))
+for(k in 2:length(years)){
+  idxcurrent <- which(electiondata$year == years[k])
+  idxpast <- which(electiondata$year == years[k-1])
+  commonstates <- intersect(electiondata$state[idxcurrent], electiondata$state[idxpast])
+  idxcurrent <- idxcurrent[which(electiondata$state[idxcurrent] %in% commonstates)]
+  idxpast <- idxpast[which(electiondata$state[idxpast] %in% commonstates)]
+  plot(Y[idxpast], Y[idxcurrent], ylab = years[k], xlab = years[k-1])
+}
+
+# does other states predict current state?
+states <- sort(unique(electiondata$state))
+Rmat <- array(NA, c(length(states), length(years), 2))
+for(k in 1:length(states)){
+  for(j in 1:length(years)){
+    idxcs <- intersect(which(electiondata$year == years[j]), which(electiondata$state == states[k]))
+    idxos <- setdiff(which(electiondata$year == years[j]), idxcs)
+    if(length(idxcs) > 0 && length(idxos) > 0){
+     Rmat[k, j, ] <- c(mean(Y[idxcs]), mean(Y[idxos])) 
+    }
+  }
+}
+par(mfrow = c(3,3))
+for(i in 1:length(states)){
+  plot(Rmat[i, , 1], Rmat[i, , 2])
+}
+```
+# Expand Model 
+
+```{r}
+# a varying coefficient model
+Ymat <- array(0, c(length(states), length(years)))
+Xmat <- array(0, c(length(states), length(years), 14))
+for(i in 1:length(years)){
+  idx <- which(electiondata$year == years[i])
+  Ymat[electiondata$state[idx], i] <- Y[idx]
+  for(j in 1:14){
+    Xmat[electiondata$state[idx], i, j] <- electiondata[idx,j+4]
+  }
+}
+Southlabel <- rep(0, length(states))
+SouthStates <- c(1, 4, 9, 10, 17, 18, 24, 33, 36, 40, 42, 43, 46)
+Southlabel[SouthStates] <- 1
+InputDataRegion <- list(Nt = length(years), Ns = length(states), p = 14, Y = Ymat, X = Xmat, Southlabel = Southlabel)
+require(rstan)
+samplesRegionalModel <- stan(file = "RegionElection.stan", data = InputDataRegion)
+samplesRM <- extract(samplesRegionalModel)
+```
+
+# Posterior check
+
+```{r}
+whichgammas <- Southlabel[electiondata$state] + 1
+gammasamples <- sapply(1:length(whichgammas), function(j){
+  samplesRM$gamma[, whichgammas[j], which(electiondata$year[j] == years)]
+})
+deltasamples <- sapply(1:length(whichgammas), function(j){
+  samplesRM$delta[, which(electiondata$year[j] == years)]
+})  
+Xbetasamples <- samplesRM$beta %*% t(electiondata[,5:18])
+
+# calculate fitted values
+fittedvaluesRM <- Xbetasamples + gammasamples + deltasamples
+# how is the fit?
+plot(fittedvaluesRM[1, ], Y)
+
+# posterior predictive quantities
+predictiedvaluesRM <- fittedvaluesRM + t(sapply(samplesRM$sigma, function(s) rnorm(length(whichgammas)) * s))
+
+# residuals
+residuepredRM <- predictiedvaluesRM - fittedvaluesRM
+residueobsRM <- t(apply(fittedvaluesRM, 1, function(x) Y - x))
+par(mfrow = c(1, 2))
+hist(residueobsRM)
+hist(residuepredRM)
+
+# predictive means and variances VS observed
+par(mfrow = c(1, 2))
+
+for(j in 1:length(years)){
+  idx <- which(electiondata$year == years[j])
+  hist(apply(predictiedvaluesRM[, idx], 1, mean), xlab="mean", freq=FALSE, main = years[j])
+  abline(v=mean(Y[idx]), col = "red")
+  hist(apply(predictiedvaluesRM[, idx], 1, var), xlab="variance", freq=FALSE, main = years[j])
+  abline(v=var(Y[idx]), col = "red")
+}
+
+```
+
+
+# Check robustness to model specification
+
+```{r}
+# Robustness to priors
+# try other priors
+
+# Robustness to Gaussian assumption
+# try student t distribution
+```
+
+
+# Model selection and model averaging
+```{r}
+# Are all the predictors useful?
+
+# What is the probability that predictor j is not useful, i.e. beta_j = 0?
+```
+

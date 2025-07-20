@@ -1,0 +1,406 @@
+---
+title: "Hierarchical normal models in Stan"
+author: ""
+date: ""
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align="center")
+```
+
+```{r load-packages, message=FALSE, warning=FALSE}
+library("rstan")
+library("ggplot2")
+library("bayesplot")
+```
+
+```{r rstan-options}
+options(mc.cores = parallel::detectCores())
+```
+
+### The famous Eight-schools data
+
+```{r data creation}
+J <- 8
+y <- c(28,  8, -3,  7, -1,  1, 18, 12)
+sigma <- c(15, 10, 16, 11,  9, 11, 10, 18)
+
+stan_rdump(c("J", "y", "sigma"), file="eight_schools.data.R")
+```
+
+```{r read some data}
+data <- read_rdump("eight_schools.data.R")
+```
+
+$$
+y_j \sim \text{Normal}(\theta_j, \sigma_j) \\
+\theta_j \sim \text{Normal}(\mu, \tau) \\
+\mu \sim \text{Normal}(0, 5) \\
+\tau \sim \text{Cauchy}(0, 5) \\
+$$
+
+### Translate Stan code to C++ and compile
+
+```{r model compilation}
+model <- stan_model('eight_schools.stan')
+```
+
+### Fit the model with MCMC
+
+```{r run the model}
+fit_cp <-
+  sampling(
+    model,
+    cores = 4,
+    chains = 4,
+    iter = 2000,
+    data = data,
+    seed = 12346
+  )
+```
+That red text looks bad...what's going on? What is a divergent transition?
+
+### Print the fit
+
+```{r fit1-print}
+print(fit_cp, pars = c("mu","tau",'theta'))
+```
+
+### Extract the posterior draws
+
+Let's examine the posterior draws. We can extract
+the draws in a few ways:
+
+- $\texttt{as.matrix(model_object)}$
+- $\texttt{rstan::extract(model_object)}$
+- $\texttt{rstan::extract(model_object, permutted = FALSE, inc_warmup = FALSE)}$
+
+```{r extract draws}
+draws <- as.matrix(fit_cp)
+draws_not_permuted <- extract(fit_cp, inc_warmup = FALSE, permuted = FALSE)
+sampler_params <- nuts_params(fit_cp)
+```
+
+### Extract the NUTS sampling parameters
+
+```{r extract nuts pars}
+sampler_params <- nuts_params(fit_cp)
+```
+
+Let's look at the sampler parameters that are returned
+by the $\texttt{nuts_params}$ from our fit.
+
+```{r examine nuts params}
+head(sampler_params)
+```
+
+### ACF of tau
+
+```{r mcmc acf tau}
+mcmc_acf_bar(draws_not_permuted[,3,],pars = 'tau')
+```
+
+### Look at the estimates for tau
+
+```{r plot-fit1-sigma_theta}
+mcmc_areas(draws, regex_pars = 'tau')
+```
+
+### Traceplot for tau
+
+```{r traceplot}
+p <-
+  mcmc_trace(
+    draws_not_permuted[,2,],
+    pars = c("tau"),
+    transformations = list(tau='log'),
+    divergences = sampler_params[sampler_params$Chain == 2,]
+  )
+p + ggtitle('Chain 2')
+```
+
+Those areas where the traceplot is flat are bad news. Let's take a look at what
+Stan is doing when it's sampling, and it'll give us a better idea as to how
+to reparameterize the model to fix the glitch
+
+This posterior is a great example of "Neal's funnel" and is a reason to 
+reparameterize the model. What am I talking about? See the slides
+on EHMC.
+
+### Posterior exhibiting weird geometry
+
+```{r mcmc scatter-funnel-bad}
+bayesplot::mcmc_scatter(draws, pars=c('theta[8]','tau'),transformations = list(tau=log))
+```
+
+What will we do? We need to reparameterize the prior for $\theta$.
+
+## Model reparameterization
+
+In our first model, the prior for the random intercept is coded like so:
+
+$$
+\theta_j \sim \text{Normal}(\mu, \tau)
+$$
+
+In datasets where the data are weak (or, more formally, when $\sigma_y / 
+\tau$ is large), the posterior of $\theta_j$ will be strongly dependent
+on values of $\tau$. That can cause problems for Euclidean Hamiltonian 
+Monte Carlo samplers because we only get one stepsize for the entire posterior
+and one stepsize won't be sufficient to explore the posterior in areas where
+$\sigma_\theta$ is quite small.
+
+We'll need to use a transformation for $\theta_j$. We can use the fact
+that if $\eta_j$ is normally distributed:
+
+
+$$
+\eta_j \sim \text{Normal}(0, 1)
+$$
+
+then
+
+$$
+\mu + \tau \times \eta_j \sim \text{Normal}(\mu, \tau)
+$$
+
+Make a copy of your first stan model into a file called:
+$\texttt{eight_schools-ncp.stan}$. 
+
+### New model
+
+We can now declare $\theta_j$ in the $\texttt{transformed parameters}$ block and 
+make it a transformation of $\eta_j$:
+
+\begin{verbatim}
+parameters {
+  ....
+  vector[J] eta;
+  ...
+}
+transformed parameters {
+  vector[J] theta;
+  theta = alpha + tau * eta;
+}
+model {
+  ...
+  eta ~ normal(0, 1);
+  ...
+}
+\end{verbatim}
+
+This is called the non-centered parameterization (NCP for short) for $\theta_j$,
+and it is likely that most models you code will require all random intercepts
+and coefficients to have the non-centered parameterization. There is a lot of
+noise in real data!
+
+### New prior for theta
+
+The new prior for $\theta$ is:
+
+$$
+y_j \sim \text{Normal}(\theta_j, \sigma) \\
+\theta_j = \tau \times \eta_j \\
+\eta_j \sim \text{Normal}(0, 1)
+$$
+
+### Translate Stan model to C++ and compile C++
+
+Compile the new model:
+
+```{r mod2}
+model_2 <- stan_model("eight_schools-ncp.stan")
+```
+
+### Fit the new model
+
+Fit the new model:
+
+```{r fit2, results="hide", message=FALSE, warning=FALSE}
+fit_ncp <-
+  sampling(
+    model_2,
+    cores = 4,
+    chains = 4,
+    iter = 2000,
+    data = data,
+    seed = 12346
+  )
+```
+
+### Print the fit
+
+```{r print-fit-ncp}
+print(fit_ncp, pars = c('tau','mu','theta'))
+```
+
+### Prior independence between tau and theta
+
+Examine the dependence between $\tau$ and $\eta_j$:
+
+```{r plot-fit2-funnel}
+draws_2 <- extract(fit_ncp, pars = c("eta","tau","theta"), permute=F)
+
+mcmc_scatter(draws_2, pars = c("theta[8]", "tau"),
+             transformations = list(tau = "log"))
+```
+
+### Posterior for tau
+
+```{r plot-fit2-sigma-2-dens}
+mcmc_areas(draws_2, regex_pars = 'tau')
+```
+
+What does this mean? Well, our Cauchy prior puts 
+non-negligible mass on 0 for $\tau$. Our data are quite
+weak, so we'd expect that our posterior for $\tau$ might still
+include zero. That looks to be the case.
+
+### Trace for tau
+
+```{r plot-fit1-funnel-traceplot}
+mcmc_trace(draws_2[,1,], pars = c("tau"),
+             transformations = list(tau = "log")) + ggtitle('Chain 1')
+
+```
+
+How did we come up with a prior of Cauchy(0, 5) for $\tau$? Let's see what
+that implies about the prior predictive distribution for $y$.
+
+## Calibrating priors
+
+Copy your code from $\texttt{eight_schools-ncp.stan}$ into a new file
+called $\texttt{eight_schools-ncp-prior.stan}$. 
+
+### New model
+
+Add the following line into the $\texttt{data}$ block:
+
+\begin{verbatim}
+data {
+  ...
+  int<lower=0, upper=1> infer;
+}
+\end{verbatim}
+
+Modify the likelihood line in the $\texttt{model}$ block:
+
+\begin{verbatim}
+model {
+  ...
+   if (infer)
+    y ~ normal(theta, sigma);
+}
+\end{verbatim}
+
+And let's add some more summary statistics into the generated
+quantities block that capture the mean and standard deviation of
+or outcome, $\texttt{y_rep}$.
+
+\begin{verbatim}
+generated quantities {
+  vector[J] y_rep;
+  real sd_theta;
+  real sd_y;
+  real mean_y;
+
+  for (j in 1:J)
+    y_rep[j] = normal_rng(theta[j], sigma[j]);
+  sd_theta = sd(theta);
+  sd_y = sd(y_rep);
+  mean_y = mean(y_rep);
+}
+\end{verbatim}
+
+### Compile the model
+
+```{r prior draws}
+model_3 <- stan_model('eight_schools-ncp-prior.stan')
+```
+
+### Modify the list of data and generate draws from the prior
+
+```{r add to data and fit model}
+data$infer <- 0
+fit_ncp_prior <-
+  sampling(
+    model_3,
+    cores = 4,
+    chains = 4,
+    iter = 2000,
+    data = data,
+    seed = 12346
+  )
+```
+
+### Extract the draws examine sd_y
+
+```{r examine-prior-draws}
+draws_prior <- as.matrix(fit_ncp_prior)
+
+mcmc_hist(draws_prior, pars = c('sd_y'))
+```
+
+### Look at a single draw of y_rep
+
+```{r examine-prior-draws-sd}
+draws_prior <- rstan::extract(fit_ncp_prior)
+
+ind_max_sd <- which.max(draws_prior$sd_y)
+ggplot(data = data.frame(y_rep = draws_prior$y_rep[ind_max_sd,]), aes(x = y_rep)) + geom_histogram()
+```
+
+### What is the implied prior on mean(y_rep)?
+
+```{r prior-over-observed-mean-for-y}
+draws_prior <- as.matrix(fit_ncp_prior)
+
+mcmc_hist(draws_prior, pars = c('mean_y'))
+```
+
+### New prior for tau
+
+Change the Cauchy(0, 5) prior for tau to a Normal(0, 5) prior for tau.
+Save the new model as $\texttt{eight_schools-ncp-prior-2.stan}$.
+
+```{r prior draws 2}
+model_4 <- stan_model('eight_schools-ncp-prior-2.stan')
+```
+
+```{r fit4, results="hide", message=FALSE, warning=FALSE}
+fit_ncp_prior_thin_tail <-
+  sampling(
+    model_4,
+    cores = 4,
+    chains = 4,
+    iter = 2000,
+    data = data,
+    seed = 12346
+  )
+```
+
+### How does the new prior for tau look?
+
+```{r examine-prior-draws-2}
+draws_prior_thin_tail <- as.matrix(fit_ncp_prior_thin_tail)
+
+mcmc_hist(draws_prior_thin_tail, pars = c('sd_y'))
+```
+
+### A single draw of y_rep
+
+```{r examine-prior-draws-sd-2}
+draws_prior_thin_tail <- rstan::extract(fit_ncp_prior_thin_tail)
+ind_max_sd <- which.max(draws_prior_thin_tail$sd_y)
+
+ggplot(data = data.frame(y_rep = draws_prior_thin_tail$y_rep[ind_max_sd,]), aes(x = y_rep)) + geom_histogram()
+```
+
+### What is the implied prior on mean(y_rep)?
+
+```{r prior-over-observed-mean-for-y-reasonable}
+draws_prior_thin_tail <- as.matrix(fit_ncp_prior_thin_tail)
+
+mcmc_hist(draws_prior_thin_tail, pars = c('mean_y'))
+```
